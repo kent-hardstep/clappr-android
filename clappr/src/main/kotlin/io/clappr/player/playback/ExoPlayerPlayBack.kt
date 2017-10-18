@@ -1,12 +1,13 @@
 package io.clappr.player.playback
 
-import android.annotation.SuppressLint
+import android.content.Context.MODE_PRIVATE
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
-import android.util.Log
+import android.support.annotation.RequiresApi
+import android.util.Base64
 import android.view.View
 import com.google.android.exoplayer2.*
 import com.google.android.exoplayer2.drm.*
@@ -35,14 +36,12 @@ import com.google.android.exoplayer2.drm.FrameworkMediaDrm
 import com.google.android.exoplayer2.drm.DefaultDrmSessionManager
 import com.google.android.exoplayer2.drm.DefaultDrmSessionManager.MODE_DOWNLOAD
 import com.google.android.exoplayer2.drm.FrameworkMediaCrypto
-import com.google.android.exoplayer2.source.dash.manifest.DashManifestParser
-import java.io.File
-import java.io.FileInputStream
 
 
 open class ExoPlayerPlayback(source: String, mimeType: String? = null, options: Options = Options()) : Playback(source, mimeType, options) {
     companion object : PlaybackSupportInterface {
         val tag: String = "ExoPlayerPlayback"
+        var licenceKey = byteArrayOf()
 
         override fun supportsSource(source: String, mimeType: String?): Boolean {
             val uri = Uri.parse(source)
@@ -77,7 +76,7 @@ open class ExoPlayerPlayback(source: String, mimeType: String? = null, options: 
     private val drmScheme = C.WIDEVINE_UUID
     private val drmLicenseUrl: String?
         get() {
-            return "https://drm.globovideos.com/widevine?deviceId=NmExZjhkODljZWE5YTZkZWQ3MTIzNmJhNzg3NQ=="//options.options[ClapprOption.DRM_LICENSE_URL.value] as? String
+            return options.options[ClapprOption.DRM_LICENSE_URL.value] as? String
         }
     private val subtitlesFromOptions = options.options[ClapprOption.SUBTITLES.value] as? HashMap<String, String>
 
@@ -220,61 +219,38 @@ open class ExoPlayerPlayback(source: String, mimeType: String? = null, options: 
         return rendererFactory
     }
 
-    @SuppressLint("NewApi")
-    fun buildDrmSessionManager(): DrmSessionManager<FrameworkMediaCrypto>? {
-//        if (Util.SDK_INT < 18 || drmLicenseUrl == null) {
-//            return null
-//        }
 
-        return buildOffLineDrmSessionManager()
+    fun buildDrmSessionManager(): DrmSessionManager<FrameworkMediaCrypto>? {
+        if (Util.SDK_INT < 18 || drmLicenseUrl == null) {
+            return null
+        }
+
+        return buildOnLineDrmSessionManager()
     }
 
-    private var drmSessionManager: Defaul   tDrmSessionManager<FrameworkMediaCrypto>? = null
+    private var drmSessionManager: DefaultDrmSessionManager<FrameworkMediaCrypto>? = null
 
+    @RequiresApi(Build.VERSION_CODES.JELLY_BEAN_MR2)
     private fun buildOffLineDrmSessionManager(): DrmSessionManager<FrameworkMediaCrypto>? {
         val defaultHttpDataSourceFactory = DefaultHttpDataSourceFactory(Util.getUserAgent(context, context?.packageName), bandwidthMeter)
 
-//        val customDrmCallback = CustomDrmCallback(defaultHttpDataSourceFactory, drmLicenseUrl!!)
-
         drmSessionManager = DefaultDrmSessionManager(drmScheme, FrameworkMediaDrm.newInstance(drmScheme), HttpMediaDrmCallback(drmLicenseUrl, defaultHttpDataSourceFactory), null, mainHandler, drmEventsListeners)
-        val licenseKey = drmSessionManager?.offlineLicenseKeySetId
-        Log.d("@@@@@", "Licence Id: ${licenseKey}")
-        drmSessionManager?.setMode(MODE_DOWNLOAD, licenseKey)
-//
-//        val file = getUriForManifest("")
-//        val uri = Uri.fromFile(file)
-//        val imputStream = FileInputStream(file)
 
-//        val offlineLicenseHelper = OfflineLicenseHelper.newWidevineInstance(customDrmCallback, null);
-//        Log.e(name, "will start download now");
+        val editor = BaseObject.context?.getSharedPreferences("drm", MODE_PRIVATE)
 
-//        val uuid = UUID.fromString("10a3a0aa-fa02-4a31-a7f1-b82421e06de5")
-//        val schemeData = DrmInitData.SchemeData(uuid, MimeTypes.APPLICATION_MP4, file)
-//        val initData = DrmInitData(schemeData)
+        var licenseKey = editor?.getString("LICENCE_KEY", null)
+        var byteLicenceKey: ByteArray? = null
 
+        if (licenseKey != null) {
+            byteLicenceKey = Base64.decode(licenseKey, Base64.DEFAULT)
+        }
 
-//        val offlineAssetKeyId = offlineLicenseHelper.downloadLicense(
-//                defaultHttpDataSourceFactory.createDataSource(), DashManifestParser().parse(uri, imputStream))
-
-//        val offlineAssetKeyId = offlineLicenseHelper.downloadLicense(initData)
-//        val license = offlineLicenseHelper.getLicenseDurationRemainingSec(offlineAssetKeyId)
-
-//        Log.e(name, "download done : " + license.toString())
-
-
-//        drmSessionManager.setMode(DefaultDrmSessionManager.MODE_QUERY, offlineAssetKeyId);
-
+        drmSessionManager?.setMode(MODE_DOWNLOAD, byteLicenceKey)
 
         return drmSessionManager
     }
 
-
-    private fun getUriForManifest(path: String = "drm/"): File {
-        val file1 = Environment.getExternalStorageDirectory()
-        val root = File(file1.getPath() + "/" + path)
-        return File(root, "Manifest.mpd")
-    }
-
+    @RequiresApi(Build.VERSION_CODES.JELLY_BEAN_MR2)
     private fun buildOnLineDrmSessionManager(): DefaultDrmSessionManager<FrameworkMediaCrypto> {
         val defaultHttpDataSourceFactory = DefaultHttpDataSourceFactory(Util.getUserAgent(context, context?.packageName), bandwidthMeter)
 
@@ -334,10 +310,23 @@ open class ExoPlayerPlayback(source: String, mimeType: String? = null, options: 
             currentState = State.PLAYING
             trigger(Event.PLAYING)
             timeElapsedHandler.start()
-            Log.d("@@@@@", "Licence Id: ${drmSessionManager?.offlineLicenseKeySetId?.toString()}")
+            setupDrmLicenceKey()
+
         } else {
             currentState = State.PAUSED
             trigger(Event.DID_PAUSE)
+        }
+    }
+
+    private fun setupDrmLicenceKey() {
+        drmSessionManager?.offlineLicenseKeySetId?.let {
+            if (drmSessionManager?.offlineLicenseKeySetId != null) {
+                val licenseKey = Base64.encodeToString(drmSessionManager?.offlineLicenseKeySetId, Base64.DEFAULT)
+                val editor = context?.getSharedPreferences("drm", MODE_PRIVATE)?.edit()
+                editor?.putString("LICENCE_KEY", licenseKey)
+                editor?.apply()
+            }
+            licenceKey = it
         }
     }
 
@@ -367,7 +356,6 @@ open class ExoPlayerPlayback(source: String, mimeType: String? = null, options: 
         if (currentState != State.ERROR) {
             timeElapsedHandler.cancel()
             currentState = State.ERROR
-//            Log.d("@@@@@", "error Licence Id: ${drmSessionManager?.offlineLicenseKeySetId}")
             triggerErrorEvent(error)
         }
     }
